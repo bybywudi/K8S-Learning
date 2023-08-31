@@ -131,9 +131,224 @@ spec:
 2.从第一步的结果中，再根据调度算法挑选一个最符合条件的节点作为最终结果。   
 所以在具体的调度流程中，默认调度器会首先调用一组叫作 Predicate 的调度算法，来检查每个 Node。然后，再调用一组叫作 Priority 的调度算法，来给上一步得到的结果里的每个 Node 打分。最终的调度结果，就是得分最高的那个 Node。
 ### 调度流程
+#### 循环1
 其中，第一个控制循环，我们可以称之为 Informer Path。它的主要目的，是启动一系列 Informer，用来监听（Watch）Etcd 中 Pod、Node、Service 等与调度相关的 API 对象的变化。   
 比如，当一个待调度 Pod（即：它的 nodeName 字段是空的）被创建出来之后，调度器就会通过 Pod Informer 的 Handler，将这个待调度 Pod 添加进调度队列。   
-在默认情况下，Kubernetes 的调度队列是一个 PriorityQueue（优先级队列），并且当某些集群信息发生变化的时候，调度器还会对调度队列里的内容进行一些特殊操作。此外，Kubernetes 的默认调度器还通过缓存以便提高 Predicate 和 Priority 调度算法的执行效率。   
+在默认情况下，Kubernetes 的调度队列是一个 PriorityQueue（优先级队列），并且当某些集群信息发生变化的时候，调度器还会对调度队列里的内容进行一些特殊操作。此外，Kubernetes 的默认调度器还通过缓存以便提高 Predicate 和 Priority 调度算法的执行效率。  、
+#### 循环2
 而第二个控制循环，是调度器负责 Pod 调度的主循环，我们可以称之为 Scheduling Path。Scheduling Path 的主要逻辑，就是不断地从调度队列里出队一个 Pod。   
+流程分为预选Predicates和优选Priorities。  
 然后，调用 Predicates 算法进行“过滤”。这一步“过滤”得到的一组 Node，就是所有可以运行这个 Pod 的宿主机列表。当然，Predicates 算法需要的 Node 信息，都是从 Scheduler Cache 里直接拿到的，这是调度器保证算法执行效率的主要手段之一。   
 接下来，调度器就会再调用 Priorities 算法为上述列表里的 Node 打分，分数从 0 到 10。得分最高的 Node，就会作为这次调度的结果。   
+
+### 调度算法示意
+图为官方给出的调度算法示意图  
+```
+For given pod:
+
+    +---------------------------------------------+
+    |               Schedulable nodes:            |
+    |                                             |
+    | +--------+    +--------+      +--------+    |
+    | | node 1 |    | node 2 |      | node 3 |    |
+    | +--------+    +--------+      +--------+    |
+    |                                             |
+    +-------------------+-------------------------+
+                        |
+                        |
+                        v
+    +-------------------+-------------------------+
+
+    Pred. filters: node 3 doesn't have enough resource
+
+    +-------------------+-------------------------+
+                        |
+                        |
+                        v
+    +-------------------+-------------------------+
+    |             remaining nodes:                |
+    |   +--------+                 +--------+     |
+    |   | node 1 |                 | node 2 |     |
+    |   +--------+                 +--------+     |
+    |                                             |
+    +-------------------+-------------------------+
+                        |
+                        |
+                        v
+    +-------------------+-------------------------+
+
+    Priority function:    node 1: p=2
+                          node 2: p=5
+
+    +-------------------+-------------------------+
+                        |
+                        |
+                        v
+            select max{node priority} = node 2
+```
+具体步骤如下：  
+1.通过一系列的“predicates”过滤掉不能运行pod的node，比如一个pod需要500M的内存，有些节点剩余内存只有100M了，就会被剔除；  
+2.通过一系列的“priority functions”给剩下的node打分，寻找能够运行pod的若干node中最合适的一个node；  
+3.得分最高的一个node，也就是被“priority functions”选中的node胜出了，获得了跑对应pod的资格。 
+### 补充信息
+#### pod的调度流程
+pod的调度是串行的，而非并发的，一个pod的ScheduleOne方法执行完成后，马上会执行另一个pod的ScheduleOne方法。这是因为如果并发的去分配pod，可能一开始认为node是空闲的，但是分配完成之后发现其他pod可能已经在同一时间绑定了该node，造成错误，但是这个过程的最后一步应该是发送pod的信息到apiserver，而不是等待pod启动，否则效率就太低了。
+#### 通过代码看看预选和优选
+##### 预选
+预选的方法是：  
+`func (g *genericScheduler) findNodesThatFit(pod *v1.Pod, nodes []*v1.Node) ([]*v1.Node, FailedPredicateMap, error)`  
+入参是Pod和NodeList,返回则是适合的NodeList和预选失败的Node的集合。   
+##### 优选
+优选的方法是：   
+`priorityList, err := PrioritizeNodes(pod, g.cachedNodeInfoMap, metaPrioritiesInterface, g.prioritizers, filteredNodes, g.extenders)`   
+入参是pod和一系列优选相关的参数，返回是一个优选列表。   
+该返回结果记录了所有Node和Node对应的分值：
+```
+type HostPriority struct {
+    // Name of the host
+    Host string
+    // Score associated with the host
+    Score int
+}
+// HostPriorityList declares a []HostPriority type.
+type HostPriorityList []HostPriority
+```
+可以看出，PrioritizeNodes()方法的作用是计算前面的预选过程筛选出来的nodes各自的Score，那么接下来的方法就可以根据分数选出最优的Node。
+#### 预选和优选的具体步骤
+##### 预选
+该函数的定义为   
+```
+func podFitsOnNode(
+    pod *v1.Pod,
+    meta algorithm.PredicateMetadata,
+    info *schedulercache.NodeInfo,
+    predicateFuncs map[string]algorithm.FitPredicate,
+    nodeCache *equivalence.NodeCache,
+    queue internalqueue.SchedulingQueue,
+    alwaysCheckAllPredicates bool,
+    equivClass *equivalence.Class,
+) (bool, []algorithm.PredicateFailureReason, error) {
+    podsAdded := false
+    for i := 0; i < 2; i++ {
+        metaToUse := meta
+        nodeInfoToUse := info
+        if i == 0 {
+            podsAdded, metaToUse, nodeInfoToUse = addNominatedPods(pod, meta, info, queue)
+        } else if !podsAdded || len(failedPredicates) != 0 {
+            break
+        }
+        eCacheAvailable = equivClass != nil && nodeCache != nil && !podsAdded
+	// predicates.Ordering()得到的是一个[]string，predicate名字集合
+	for predicateID, predicateKey := range predicates.Ordering() {
+	    var (
+		fit     bool
+		reasons []algorithm.PredicateFailureReason
+		err     error
+	    )
+	    if predicate, exist := predicateFuncs[predicateKey]; exist {
+		if eCacheAvailable {
+		    fit, reasons, err = nodeCache.RunPredicate(predicate, predicateKey, predicateID, pod, metaToUse, nodeInfoToUse, equivClass)
+		} else {
+		    // 真正调用predicate函数了
+		    fit, reasons, err = predicate(pod, metaToUse, nodeInfoToUse)
+		}
+		if err != nil {
+		    return false, []algorithm.PredicateFailureReason{}, err
+		}
+		if !fit {
+		    // ……
+		}
+	    }
+	}
+    }
+    return len(failedPredicates) == 0, failedPredicates, nil
+}
+```
+该方法的步骤是：
+1.遍历已经注册好的预选策略predicates.Ordering()，按顺序执行对应的策略函数   
+2.遍历执行每个策略函数，并返回是否合适，预选失败的原因和错误   
+3.如果预选函数执行失败，则加入预选失败的数组中，直接返回，后面的预选函数不会再执行   
+4.如果该 node 上存在 高优先级 pod 则执行两次预选函数   
+   
+对于第一个for循环，翻译官方的注释：
+   
+出于某些原因考虑我们需要运行两次predicate. 如果node上有更高或者相同优先级的“指定pods”（这里的“指定pods”指的是通过schedule计算后指定要跑在一个node上但是还未真正运行到那个node上的pods），我们将这些pods加入到meta和nodeInfo后执行一次计算过程。
+如果这个过程所有的predicates都成功了，我们再假设这些“指定pods”不会跑到node上再运行一次。第二次计算是必须的，因为有一些predicates比如pod亲和性，也许在“指定pods”没有成功跑到node的情况下会不满足。
+如果没有“指定pods”或者第一次计算过程失败了，那么第二次计算不会进行。
+我们在第一次调度的时候只考虑相等或者更高优先级的pods，因为这些pod是当前pod必须“臣服”的，也就是说不能够从这些pod中抢到资源，这些pod不会被当前pod“抢占”；这样当前pod也就能够安心从低优先级的pod手里抢资源了。
+新pod在上述2种情况下都可调度基于一个保守的假设：资源和pod反亲和性等的predicate在“指定pods”被处理为Running时更容易失败；pod亲和性在“指定pods”被处理为Not Running时更加容易失败。
+我们不能假设“指定pods”是Running的因为它们当前还没有运行，而且事实上，它们确实有可能最终又被调度到其他node上了。
+   
+对于第二个for循环，有两个要点。第一个是predicates.Ordering()函数，该函数是根据一个predicate的顺序进行预选，官方给出了一个顺序的表格，可以看到预选是进行一系列有顺序的对node和pod的判定。   
+
+|Position                  | Predicate                        | comments (note, justification...)              |
+ ----------------- | ---------------------------- | ------------------
+| 1 | `CheckNodeConditionPredicate`  | we really don’t want to check predicates against unschedulable nodes. |
+| 2           | `PodFitsHost`            | we check the pod.spec.nodeName. |
+| 3           | `PodFitsHostPorts` | we check ports asked on the spec. |
+| 4 | `PodMatchNodeSelector`            | check node label after narrowing search. |
+| 5           | `PodFitsResources `            | this one comes here since it’s not restrictive enough as we do not try to match values but ranges. |
+| 6           | `NoDiskConflict` | Following the resource predicate, we check disk |
+| 7 | `PodToleratesNodeTaints '`            | check toleration here, as node might have toleration |
+| 8          | `PodToleratesNodeNoExecuteTaints`            | check toleration here, as node might have toleration |
+| 9           | `CheckNodeLabelPresence ` | labels are easy to check, so this one goes before |
+| 10 | `checkServiceAffinity `            | - |
+| 11           | `MaxPDVolumeCountPredicate `            | - |
+| 12           | `VolumeNodePredicate ` | - |
+| 13 | `VolumeZonePredicate `            | - |
+| 14           | `CheckNodeMemoryPressurePredicate`            | doesn’t happen often |
+| 15           | `CheckNodeDiskPressurePredicate` | doesn’t happen often |
+| 16 | `InterPodAffinityMatches`            | Most expensive predicate to compute |
+
+第二个就是`fit, reasons, err = predicate(pod, metaToUse, nodeInfoToUse)`这个调用，是根据上面给出的顺序调用具体的predicate函数。以`NoDiskConflict`为例：
+```
+func NoDiskConflict(pod *v1.Pod, meta algorithm.PredicateMetadata, nodeInfo *schedulercache.NodeInfo) (bool, []algorithm.PredicateFailureReason, error) {
+    for _, v := range pod.Spec.Volumes {
+        for _, ev := range nodeInfo.Pods() {
+            if isVolumeConflict(v, ev) {
+                return false, []algorithm.PredicateFailureReason{ErrDiskConflict}, nil
+            }
+        }
+    }
+    return true, nil, nil
+}
+```
+这个函数遍历pod的Volumes，然后对于pod的每一个Volume，遍历node上的每个pod，看是否和当前podVolume冲突。如果不fit就返回false加原因；如果fit就返回true，预选函数都是这样类似的实现。
+
+##### 优选
+
+priorities 调度算法是在 pridicates 算法后执行的，主要功能是对已经过滤出的 nodes 进行打分并选出最佳的一个 node。
+默认的调度算法是：
+```
+func defaultPriorities() sets.String {
+    return sets.NewString(
+        priorities.SelectorSpreadPriority,
+        priorities.InterPodAffinityPriority,
+        priorities.LeastRequestedPriority,
+        priorities.BalancedResourceAllocation,
+        priorities.NodePreferAvoidPodsPriority,
+        priorities.NodeAffinityPriority,
+        priorities.TaintTolerationPriority,
+        priorities.ImageLocalityPriority,
+    )
+}
+
+```
+
+|priorities 算法|	说明|
+|----------------- | ------------------|
+|SelectorSpreadPriority|	按 service，rs，statefulset 归属计算 Node 上分布最少的同类 Pod数量，数量越少得分越高，默认权重为1|
+|InterPodAffinityPriority|	pod 亲和性选择策略，默认权重为1|
+|LeastRequestedPriority	|选择空闲资源（CPU 和 Memory）最多的节点，默认权重为1，其计算方式为：score = (cpu((capacity-sum(requested))10/capacity) + memory((capacity-sum(requested))10/capacity))/2|
+|BalancedResourceAllocation|	CPU、Memory 以及 Volume 资源分配最均衡的节点，默认权重为1，其计算方式为：score = 10 - variance(cpuFraction,memoryFraction,volumeFraction)*10|
+|NodePreferAvoidPodsPriority|	判断 node annotation 是否有scheduler.alpha.kubernetes.io/preferAvoidPods 标签，类似于 taints 机制，过滤标签中定义类型的 pod，默认权重为10000|
+|NodeAffinityPriority	|节点亲和性选择策略，默认权重为1|
+|TaintTolerationPriority|	Pod 是否容忍节点上的 Taint，优先调度到标记了 Taint 的节点，默认权重为1|
+|ImageLocalityPriority	|待调度 Pod 需要使用的镜像是否存在于该节点，默认权重为1|
+执行 priorities 调度算法的逻辑是在 PrioritizeNodes()函数中，其目的是执行每个 priority 函数为 node 打分，分数为 0-10，其功能主要有：   
+   
+PrioritizeNodes() 通过并行运行各个优先级函数来对节点进行打分   
+每个优先级函数会给节点打分，打分范围为 0-10 分，0 表示优先级最低的节点，10表示优先级最高的节点   
+每个优先级函数有各自的权重   
+优先级函数返回的节点分数乘以权重以获得加权分数   
+最后计算所有节点的总加权分数  
