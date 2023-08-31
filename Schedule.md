@@ -131,6 +131,7 @@ spec:
 2.从第一步的结果中，再根据调度算法挑选一个最符合条件的节点作为最终结果。   
 所以在具体的调度流程中，默认调度器会首先调用一组叫作 Predicate 的调度算法，来检查每个 Node。然后，再调用一组叫作 Priority 的调度算法，来给上一步得到的结果里的每个 Node 打分。最终的调度结果，就是得分最高的那个 Node。
 ### 调度流程
+![](https://github.com/bybywudi/K8S-Learning/blob/main/k8s1.png)
 #### 循环1
 其中，第一个控制循环，我们可以称之为 Informer Path。它的主要目的，是启动一系列 Informer，用来监听（Watch）Etcd 中 Pod、Node、Service 等与调度相关的 API 对象的变化。   
 比如，当一个待调度 Pod（即：它的 nodeName 字段是空的）被创建出来之后，调度器就会通过 Pod Informer 的 Handler，将这个待调度 Pod 添加进调度队列。   
