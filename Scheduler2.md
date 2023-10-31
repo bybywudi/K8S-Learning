@@ -110,7 +110,7 @@ QoS分为以下3种：
 
 ### 2.1 调度流程
 
-![](https://s3-conveyor.didiglobal.com/didoc-upload-image-prod/1694160790899/image.png)
+![](https://github.com/bybywudi/K8S-Learning/blob/main/k8s1.png)
 
 图2. k8s调度流程示意图
 
