@@ -4,7 +4,7 @@
 ## 一、资源模型和资源管理
 
 在 Kubernetes 里，Pod 是最小的原子调度单位。这也就意味着，所有跟调度和资源管理相关的属性都应该是属于 Pod 对象的字段。而这其中最重要的部分，就是 Pod 的 CPU 和内存配置
-
+```
   apiVersion: v1
 
   kind: Pod
@@ -57,6 +57,7 @@
             memory: "128Mi"
 
             cpu: "500m"
+```
 
 图1 Pod 的资源配置
 
@@ -134,7 +135,7 @@ QoS分为以下3种：
 1.通过一系列的“predicates”过滤掉不能运行pod的node，比如一个pod需要500M的内存，有些节点剩余内存只有100M了，就会被剔除；  
 2.通过一系列的“priority functions”给剩下的node打分，寻找能够运行pod的若干node中最合适的一个node；  
 3.得分最高的一个node，也就是被“priority functions”选中的node胜出了，获得了跑对应pod的资格。
-
+```
   For given pod:
 
     +---------------------------------------------+
@@ -206,7 +207,7 @@ QoS分为以下3种：
       v
 
       select max{node priority} = node 2
-
+```
 图3. 调度算法示意图
 
 #### 2.1.3 调度结果的更新
@@ -248,13 +249,13 @@ QoS分为以下3种：
 在 Predicates 阶段完成了节点的“过滤”之后，Priorities 阶段的工作就是为这些节点打分。这里打分的范围是 0-10 分，得分最高的节点就是最后被 Pod 绑定的最佳节点。
 
 最常用到的一个打分规则，是 LeastRequestedPriority，这个算法实际上就是在选择空闲资源（CPU 和 Memory）最多的宿主机。计算方法：
-
+```
   score = (cpu((capacity-sum(requested))10/capacity) + memory((capacity-sum(requested))10/capacity))/2
-
+```
 还有 BalancedResourceAllocation。它的计算公式如下所示：
-
+```
   score = 10 - variance(cpuFraction,memoryFraction,volumeFraction)*10
-
+```
 其中，每种资源的 Fraction 的定义是 ：Pod 请求的资源 / 节点上的可用资源。而 variance 算法的作用，则是计算每两种资源 Fraction 之间的“距离”。而最后选择的，则是资源 Fraction 差距最小的节点。所以说，BalancedResourceAllocation 选择的，其实是调度完成后，所有节点里各种资源分配最均衡的那个节点，从而避免一个节点上 CPU 被大量分配、而 Memory 大量剩余的情况。
 
 此外，还有 NodeAffinityPriority、TaintTolerationPriority 和 InterPodAffinityPriority 这三种 Priority。顾名思义，它们与前面的 PodMatchNodeSelector、PodToleratesNodeTaints 和 PodAffinityPredicate 这三个 Predicate 的含义和计算方法是类似的。但是作为 Priority，一个 Node 满足上述规则的字段数目越多，它的得分就会越高。
@@ -266,7 +267,7 @@ QoS分为以下3种：
 预选的方法是：`func (g *genericScheduler) findNodesThatFit(pod *v1.Pod, nodes []*v1.Node) ([]*v1.Node, FailedPredicateMap, error)`入参是Pod和NodeList,返回则是适合的NodeList和预选失败的Node的集合。
 
 优选的方法是：`priorityList, err := PrioritizeNodes(pod, g.cachedNodeInfoMap, metaPrioritiesInterface, g.prioritizers, filteredNodes, g.extenders)`入参是pod和一系列优选相关的参数，返回是一个优选列表。该返回结果记录了所有Node和Node对应的分值：
-
+```
   type HostPriority struct {
 
     // Name of the host
@@ -282,11 +283,11 @@ QoS分为以下3种：
   // HostPriorityList declares a []HostPriority type.
 
   type HostPriorityList []HostPriority
-
+```
 #### 预选和优选的具体步骤
 
 预选函数的定义为
-
+```
   func podFitsOnNode(
 
     pod *v1.Pod,
@@ -376,7 +377,7 @@ QoS分为以下3种：
       return len(failedPredicates) == 0, failedPredicates, nil
 
   }
-
+```
 该方法的步骤是：
 
 1.遍历已经注册好的预选策略predicates.Ordering()，按顺序执行对应的策略函数  
@@ -407,7 +408,7 @@ QoS分为以下3种：
 
 
 以`NoDiskConflict`为例：
-
+```
   func NoDiskConflict(pod *v1.Pod, meta algorithm.PredicateMetadata, nodeInfo *schedulercache.NodeInfo) (bool, []algorithm.PredicateFailureReason, error) {
 
     for _, v := range pod.Spec.Volumes {
@@ -455,7 +456,7 @@ QoS分为以下3种：
     )
 
   }
-
+```
 |priorities 算法|说明|
 |-|-|
 |SelectorSpreadPriority|按 service，rs，statefulset 归属计算 Node 上分布最少的同类 Pod数量，数量越少得分越高，默认权重为1|
